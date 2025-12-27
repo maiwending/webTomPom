@@ -1,0 +1,88 @@
+:root {
+  --bg: #0b0f1a;
+  --accent: #f5d547;
+  --ink: #e9eef8;
+  --muted: #9aa6b2;
+  --panel: #141a2a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: "Bahnschrift", "Trebuchet MS", sans-serif;
+  color: var(--ink);
+  background: radial-gradient(circle at top, #1a2340, #0b0f1a 60%);
+}
+
+.page {
+  width: min(960px, 92vw);
+  padding: 32px 0 48px;
+}
+
+.header h1 {
+  font-size: clamp(2.2rem, 5vw, 3rem);
+  margin: 0;
+  letter-spacing: 0.04em;
+}
+
+.tagline {
+  color: var(--muted);
+  margin: 8px 0 24px;
+}
+
+.stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: linear-gradient(140deg, #12192d, #0f1526);
+  border-radius: 24px;
+  box-shadow: 0 20px 40px rgba(2, 6, 24, 0.6);
+}
+
+canvas {
+  width: min(640px, 90vw);
+  height: auto;
+  border: 2px solid var(--accent);
+  border-radius: 16px;
+  background: #000;
+}
+
+.hud {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  text-align: right;
+  font-family: "Consolas", "Courier New", monospace;
+  color: var(--accent);
+}
+
+.controls {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  margin-top: 24px;
+  padding: 16px;
+  background: var(--panel);
+  border-radius: 16px;
+}
+
+.controls h2 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent);
+}
+
+.controls p {
+  margin: 6px 0;
+  color: var(--muted);
+}

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TomPom Web</title>
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <main class="page">
+      <header class="header">
+        <h1>TomPom Web</h1>
+        <p class="tagline">Open two browsers on the same network and play.</p>
+      </header>
+      <section class="stage">
+        <canvas id="game" width="640" height="480"></canvas>
+        <div class="hud">
+          <div id="role">Connecting...</div>
+          <div id="status"></div>
+        </div>
+      </section>
+      <section class="controls">
+        <div>
+          <h2>Controls</h2>
+          <p>Left player: W / S</p>
+          <p>Right player: Up / Down</p>
+          <p>Reset: Space</p>
+        </div>
+        <div>
+          <h2>Hosting</h2>
+          <p>Server: http://localhost:8000</p>
+          <p>Share: http://YOUR-IP:8000</p>
+        </div>
+      </section>
+    </main>
+    <script src="game.js"></script>
+  </body>
+</html>
