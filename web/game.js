@@ -91,6 +91,12 @@ function connect() {
     if (event.key === "s" || event.key === "S") keys.down = true;
     if (event.key === "ArrowUp") keys.up = true;
     if (event.key === "ArrowDown") keys.down = true;
+    if (event.key === "+" || event.key === "=") {
+      ws.send(JSON.stringify({ type: "speed", delta: 1 }));
+    }
+    if (event.key === "-" || event.key === "_") {
+      ws.send(JSON.stringify({ type: "speed", delta: -1 }));
+    }
     if (event.key === " ") {
       ws.send(JSON.stringify({ type: "reset" }));
     }

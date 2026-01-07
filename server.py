@@ -51,6 +51,8 @@ class GameState:
         self.score_right = 0
         self.game_time = 0
         self.base_speed = 5.0
+        self.rally_speed = 5.0
+        self.rally_speed_locked = False
         self.left = PlayerState(y=(HEIGHT - PADDLE_H) / 2.0)
         self.right = PlayerState(y=(HEIGHT - PADDLE_H) / 2.0)
         self.ball = self._new_ball(angle=0.47, speed=self.base_speed)
@@ -72,6 +74,8 @@ class GameState:
         self.score_right = 0
         self.game_time = 0
         self.base_speed = 5.0
+        self.rally_speed = self.base_speed
+        self.rally_speed_locked = False
         self.left.y = (HEIGHT - PADDLE_H) / 2.0
         self.right.y = (HEIGHT - PADDLE_H) / 2.0
         self.ball = self._new_ball(angle=0.47, speed=self.base_speed)
@@ -135,6 +139,11 @@ class PongServer:
             async with self.lock:
                 if self.state.game_over:
                     self.state.reset()
+        elif msg_type == "speed":
+            delta = msg.get("delta")
+            if isinstance(delta, (int, float)):
+                async with self.lock:
+                    self._adjust_speed(delta)
 
     async def ws_handler(self, ws):
         await self.register(ws)
@@ -285,6 +294,8 @@ class PongServer:
 
             self.state.game_time += 1
             self.state.base_speed = max(1.0, 5.0 + (self.state.game_time * 0.001))
+            if not self.state.rally_speed_locked:
+                self.state.rally_speed = self.state.base_speed
 
             self.state.left.move = self.input_by_role["left"]
             self.state.right.move = self.input_by_role["right"]
@@ -330,7 +341,7 @@ class PongServer:
                         angle = self._reflect_angle(
                             ball_center_y, self.state.left.y, self.state.left.move
                         )
-                        speed = self.state.base_speed
+                        speed = self.state.rally_speed
                         ball.vx = speed * math.cos(angle)
                         ball.vy = speed * math.sin(angle)
                         ball.hit = True
@@ -342,7 +353,7 @@ class PongServer:
                         angle = math.pi + self._reflect_angle(
                             ball_center_y, self.state.right.y, self.state.right.move
                         )
-                        speed = self.state.base_speed
+                        speed = self.state.rally_speed
                         ball.vx = speed * math.cos(angle)
                         ball.vy = speed * math.sin(angle)
                         ball.hit = True
@@ -368,8 +379,26 @@ class PongServer:
             spread = math.pi / 6.0
             jitter = random.uniform(-spread / 2.0, spread / 2.0)
             base_angle = math.pi if side == "left" else 0.0
-            speed = self.state.base_speed
+            self.state.rally_speed_locked = False
+            self.state.rally_speed = self.state.base_speed
+            speed = self.state.rally_speed
             self.state.ball = self.state._new_ball(base_angle + jitter, speed)
+
+    def _adjust_speed(self, delta):
+        start_speed = (
+            self.state.rally_speed if self.state.rally_speed_locked else self.state.base_speed
+        )
+        new_speed = max(1.0, min(15.0, start_speed + delta))
+        if new_speed == start_speed:
+            return
+        self.state.rally_speed = new_speed
+        self.state.rally_speed_locked = True
+        ball = self.state.ball
+        magnitude = math.hypot(ball.vx, ball.vy)
+        if magnitude > 0:
+            scale = new_speed / magnitude
+            ball.vx *= scale
+            ball.vy *= scale
 
     async def broadcast_state(self):
         state = {
