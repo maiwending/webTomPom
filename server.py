@@ -3,12 +3,14 @@ import json
 import math
 import os
 import random
+import re
 import threading
 import time
 from dataclasses import dataclass
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
+import requests
 import websockets
 
 WIDTH = 640
@@ -19,6 +21,13 @@ BALL_SIZE = 16
 PADDLE_SPEED = 10
 TARGET_FPS = 60
 WIN_SCORE = 5
+SPIN_STRENGTH = 0.15  # Adds curve based on paddle movement at impact
+AI_ENDPOINT = os.getenv("TOMPOM_AI_ENDPOINT", "http://localhost:1234/v1/chat/completions")
+AI_MODEL = os.getenv("TOMPOM_AI_MODEL", "meta-llama-3-8b-instruct")
+AI_TIMEOUT = float(os.getenv("TOMPOM_AI_TIMEOUT", "0.8"))
+AI_INTERVALS = {"easy": 0.25, "medium": 0.12, "hard": 0.06}
+AI_DEADBAND = {"easy": 18, "medium": 10, "hard": 6}
+AI_PADDLE_SPEED = {"easy": 6, "medium": 8, "hard": 10}
 
 
 @dataclass
@@ -77,6 +86,15 @@ class PongServer:
         self.roles = {}
         self.input_by_role = {"left": 0, "right": 0}
         self.lock = asyncio.Lock()
+        self.ai_mode = os.getenv("TOMPOM_AI", "auto").lower()
+        self.ai_difficulty = os.getenv("TOMPOM_AI_DIFFICULTY", "medium").lower()
+        self.ai_interval = AI_INTERVALS.get(self.ai_difficulty, AI_INTERVALS["medium"])
+        self.ai_deadband = AI_DEADBAND.get(self.ai_difficulty, AI_DEADBAND["medium"])
+        self.ai_paddle_speed = AI_PADDLE_SPEED.get(
+            self.ai_difficulty, AI_PADDLE_SPEED["medium"]
+        )
+        self.ai_role = None
+        self.ai_target_y = {"left": None, "right": None}
 
     def _assign_role(self, ws):
         if "left" not in self.roles.values():
@@ -94,6 +112,7 @@ class PongServer:
     async def register(self, ws):
         self.clients.add(ws)
         role = self._assign_role(ws)
+        self._update_ai_assignment()
         await self._send_role(ws, role)
 
     async def unregister(self, ws):
@@ -101,6 +120,7 @@ class PongServer:
         role = self.roles.pop(ws, None)
         if role in self.input_by_role:
             self.input_by_role[role] = 0
+        self._update_ai_assignment()
 
     async def handle_message(self, ws, msg):
         role = self.roles.get(ws, "spectator")
@@ -128,12 +148,135 @@ class PongServer:
         finally:
             await self.unregister(ws)
 
-    def _reflect_angle(self, ball_center_y, paddle_y):
+    def _reflect_angle(self, ball_center_y, paddle_y, paddle_move):
         hit_pos = (ball_center_y - paddle_y) / PADDLE_H
         hit_pos = max(0.0, min(1.0, hit_pos))
         angle_range = math.pi / 3.0
         angle_offset = (hit_pos - 0.5) * 2 * angle_range
-        return angle_offset
+        # Add spin based on paddle movement (-1 up, 1 down)
+        spin = -paddle_move * SPIN_STRENGTH
+        return angle_offset + spin
+
+    def _update_ai_assignment(self):
+        if self.ai_mode == "off":
+            self.ai_role = None
+            return
+
+        humans = {role for role in self.roles.values() if role in ("left", "right")}
+        if self.ai_mode == "on":
+            if "left" not in humans:
+                self.ai_role = "left"
+            elif "right" not in humans:
+                self.ai_role = "right"
+            else:
+                self.ai_role = None
+            return
+
+        # Auto: use AI only when exactly one human is connected.
+        if len(humans) == 1:
+            self.ai_role = "right" if "left" in humans else "left"
+        else:
+            self.ai_role = None
+
+    def _predict_ball_y(self, snapshot, target_x):
+        bx = snapshot["ball_x"]
+        by = snapshot["ball_y"]
+        vx = snapshot["ball_vx"]
+        vy = snapshot["ball_vy"]
+        if vx == 0:
+            return by
+
+        t = (target_x - bx) / vx
+        if t <= 0:
+            return by
+
+        projected = by + vy * t
+        period = 2 * (HEIGHT - BALL_SIZE)
+        y = projected % period
+        if y > HEIGHT - BALL_SIZE:
+            y = period - y
+        return y
+
+    def _ai_target_for(self, role, snapshot):
+        if role == "left":
+            paddle_x = PADDLE_W
+        else:
+            paddle_x = WIDTH - PADDLE_W - BALL_SIZE
+
+        moving_toward = snapshot["ball_vx"] < 0 if role == "left" else snapshot["ball_vx"] > 0
+        if moving_toward:
+            target_y = self._predict_ball_y(snapshot, paddle_x) - PADDLE_H / 2.0
+        else:
+            target_y = (HEIGHT - PADDLE_H) / 2.0
+
+        return max(0.0, min(HEIGHT - PADDLE_H, target_y))
+
+    def _llm_move(self, role, snapshot):
+        prompt = (
+            "You control a Pong paddle. Reply with exactly one word: UP, DOWN, or STAY.\n"
+            f"role={role}\n"
+            f"paddle_y={snapshot['left_y'] if role == 'left' else snapshot['right_y']}\n"
+            f"ball_x={snapshot['ball_x']}\n"
+            f"ball_y={snapshot['ball_y']}\n"
+            f"ball_vx={snapshot['ball_vx']}\n"
+            f"ball_vy={snapshot['ball_vy']}\n"
+            f"height={HEIGHT}\n"
+        )
+        payload = {
+            "model": AI_MODEL,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "Return only UP, DOWN, or STAY. No other text.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            "max_tokens": 4,
+            "temperature": 0.2,
+            "stream": False,
+        }
+
+        try:
+            response = requests.post(AI_ENDPOINT, json=payload, timeout=AI_TIMEOUT)
+            response.raise_for_status()
+            data = response.json()
+        except Exception:
+            return None
+
+        content = ""
+        if "choices" in data and data["choices"]:
+            content = data["choices"][0]["message"]["content"]
+        elif "message" in data and "content" in data["message"]:
+            content = data["message"]["content"]
+        elif "messages" in data and data["messages"]:
+            content = data["messages"][-1]["content"]
+
+        match = re.search(r"\b(up|down|stay)\b", str(content), re.IGNORECASE)
+        if not match:
+            return None
+        word = match.group(1).lower()
+        if word == "up":
+            return -1
+        if word == "down":
+            return 1
+        return 0
+
+    async def ai_loop(self):
+        while True:
+            await asyncio.sleep(self.ai_interval)
+            async with self.lock:
+                role = self.ai_role
+                if not role or self.state.game_over:
+                    continue
+                snapshot = {
+                    "left_y": self.state.left.y,
+                    "right_y": self.state.right.y,
+                    "ball_x": self.state.ball.x,
+                    "ball_y": self.state.ball.y,
+                    "ball_vx": self.state.ball.vx,
+                    "ball_vy": self.state.ball.vy,
+                }
+                self.ai_target_y[role] = self._ai_target_for(role, snapshot)
 
     async def update(self):
         async with self.lock:
@@ -146,8 +289,26 @@ class PongServer:
             self.state.left.move = self.input_by_role["left"]
             self.state.right.move = self.input_by_role["right"]
 
-            self.state.left.y += self.state.left.move * PADDLE_SPEED
-            self.state.right.y += self.state.right.move * PADDLE_SPEED
+            # If AI controls a side, move paddle toward predicted intercept.
+            if self.ai_role == "left":
+                target = self.ai_target_y["left"]
+                if target is not None:
+                    diff = target - self.state.left.y
+                    step = max(-self.ai_paddle_speed, min(self.ai_paddle_speed, diff))
+                    self.state.left.y += step
+                self.state.left.move = 0
+            else:
+                self.state.left.y += self.state.left.move * PADDLE_SPEED
+
+            if self.ai_role == "right":
+                target = self.ai_target_y["right"]
+                if target is not None:
+                    diff = target - self.state.right.y
+                    step = max(-self.ai_paddle_speed, min(self.ai_paddle_speed, diff))
+                    self.state.right.y += step
+                self.state.right.move = 0
+            else:
+                self.state.right.y += self.state.right.move * PADDLE_SPEED
             self.state.left.y = max(0, min(HEIGHT - PADDLE_H, self.state.left.y))
             self.state.right.y = max(0, min(HEIGHT - PADDLE_H, self.state.right.y))
 
@@ -166,7 +327,9 @@ class PongServer:
             if ball.x <= left_x:
                 if self.state.left.y - BALL_SIZE <= ball.y <= self.state.left.y + PADDLE_H:
                     if not ball.hit:
-                        angle = self._reflect_angle(ball_center_y, self.state.left.y)
+                        angle = self._reflect_angle(
+                            ball_center_y, self.state.left.y, self.state.left.move
+                        )
                         speed = self.state.base_speed
                         ball.vx = speed * math.cos(angle)
                         ball.vy = speed * math.sin(angle)
@@ -176,7 +339,9 @@ class PongServer:
             elif ball.x >= right_x:
                 if self.state.right.y - BALL_SIZE <= ball.y <= self.state.right.y + PADDLE_H:
                     if not ball.hit:
-                        angle = math.pi + self._reflect_angle(ball_center_y, self.state.right.y)
+                        angle = math.pi + self._reflect_angle(
+                            ball_center_y, self.state.right.y, self.state.right.move
+                        )
                         speed = self.state.base_speed
                         ball.vx = speed * math.cos(angle)
                         ball.vy = speed * math.sin(angle)
@@ -256,6 +421,7 @@ async def main():
 
     server = PongServer()
     async with websockets.serve(server.ws_handler, "0.0.0.0", 8765):
+        asyncio.create_task(server.ai_loop())
         await server.game_loop()
 
 
